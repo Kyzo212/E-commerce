@@ -11,7 +11,7 @@ from werkzeug.middleware.shared_data import SharedDataMiddleware
 from werkzeug.utils import redirect
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from app.database import SessionLocal
+from database import SessionLocal
 from models import Product, User, Order, OrderItem
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
