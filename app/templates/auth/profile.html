@@ -149,9 +149,19 @@
           </span>
         </div>
         <div style="padding:0;">
-          {% if current_user and current_user.is_admin %}
+          {% if current_user and current_user.is_seller %}
+          <a href="/seller/listings/" style="display:flex;align-items:center;justify-content:space-between;padding:15px 20px;border-bottom:1px solid var(--border);text-decoration:none;color:var(--ink);font-size:.88rem;cursor:pointer;transition:background 200ms;" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background='transparent'">
+            <span><i class="bi bi-bag-check me-2" aria-hidden="true" style="color:var(--muted);"></i>My listings</span>
+            <i class="bi bi-arrow-right" aria-hidden="true" style="color:var(--muted-2);font-size:.8rem;"></i>
+          </a>
           <a href="/products/create/" style="display:flex;align-items:center;justify-content:space-between;padding:15px 20px;border-bottom:1px solid var(--border);text-decoration:none;color:var(--ink);font-size:.88rem;cursor:pointer;transition:background 200ms;" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background='transparent'">
             <span><i class="bi bi-plus-circle me-2" aria-hidden="true" style="color:var(--muted);"></i>List a product</span>
+            <i class="bi bi-arrow-right" aria-hidden="true" style="color:var(--muted-2);font-size:.8rem;"></i>
+          </a>
+          {% endif %}
+          {% if current_user and current_user.is_admin %}
+          <a href="/admin/orders/" style="display:flex;align-items:center;justify-content:space-between;padding:15px 20px;border-bottom:1px solid var(--border);text-decoration:none;color:var(--ink);font-size:.88rem;cursor:pointer;transition:background 200ms;" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background='transparent'">
+            <span><i class="bi bi-shield-lock me-2" aria-hidden="true" style="color:var(--muted);"></i>Admin dashboard</span>
             <i class="bi bi-arrow-right" aria-hidden="true" style="color:var(--muted-2);font-size:.8rem;"></i>
           </a>
           {% endif %}

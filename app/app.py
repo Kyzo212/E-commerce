@@ -12,7 +12,8 @@ from werkzeug.utils import redirect
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from database import SessionLocal
-from models import Product, User, Order, OrderItem
+from models import Product, User, Order, OrderItem, SellerProfile
+from sqlalchemy.orm import joinedload
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR  = os.path.join(BASE_DIR, "static", "uploads")
@@ -62,6 +63,14 @@ url_map = Map([
     Rule("/checkout/",                 endpoint="checkout",       methods=["GET", "POST"]),
     Rule("/orders/",                   endpoint="order_list",     methods=["GET"]),
     Rule("/orders/<int:id>/",          endpoint="order_detail",   methods=["GET"]),
+    Rule("/admin/",                    endpoint="admin_dashboard", methods=["GET"]),
+    Rule("/admin/orders/",             endpoint="admin_orders",   methods=["GET"]),
+    Rule("/admin/orders/<int:id>/",    endpoint="admin_order_detail", methods=["GET"]),
+    Rule("/admin/orders/<int:id>/status/", endpoint="admin_order_status", methods=["POST"]),
+    Rule("/admin/users/",              endpoint="admin_users",    methods=["GET"]),
+    Rule("/admin/users/<int:id>/toggle/", endpoint="admin_user_toggle", methods=["POST"]),
+    Rule("/admin/users/<int:id>/approve-seller/", endpoint="admin_user_approve_seller", methods=["POST"]),
+    Rule("/seller/listings/",          endpoint="seller_listings", methods=["GET"]),
 ])
 
 
@@ -77,7 +86,10 @@ def _get_current_user(request):
         return None
     db = SessionLocal()
     try:
-        return db.get(User, uid)
+        user = db.get(User, uid)
+        if user and not user.is_active:
+            return None
+        return user
     finally:
         db.close()
 
@@ -94,6 +106,16 @@ def _require_admin(request):
     if not user:
         return redirect("/login/")
     if not user.is_admin:
+        return render("403.html", {}, status=403, request=request)
+    return None
+
+
+def _require_seller(request):
+    """Return None if user is a seller/admin, else return a redirect/403 response."""
+    user = _get_current_user(request)
+    if not user:
+        return redirect("/login/")
+    if not user.is_seller:
         return render("403.html", {}, status=403, request=request)
     return None
 
@@ -158,6 +180,9 @@ def login(request):
         return redirect("/")
     errors = []
     form = {}
+    if request.method == "GET":
+        if request.args.get("need_login") == "1":
+            errors.append("Please sign in first to continue checkout.")
     if request.method == "POST":
         form = request.form
         email    = form.get("email", "").strip().lower()
@@ -170,10 +195,13 @@ def login(request):
                 user = db.query(User).filter_by(email=email).first()
             finally:
                 db.close()
-            if user and check_password_hash(user.password, password):
+            if user and user.is_active and check_password_hash(user.password, password):
                 resp = redirect(request.args.get("next") or "/")
                 return _set_session(resp, user.user_id)
-            errors.append("Invalid email or password.")
+            if user and not user.is_active:
+                errors.append("Your account has been deactivated.")
+            else:
+                errors.append("Invalid email or password.")
     return render("auth/login.html", {"errors": errors, "form": form}, request=request)
 
 
@@ -188,6 +216,7 @@ def register(request):
         email    = form.get("email", "").strip().lower()
         password = form.get("password", "")
         confirm  = form.get("confirm", "")
+        wants_seller = form.get("want_seller") == "on"
         if not username:
             errors.append("Username is required.")
         if not email:
@@ -205,11 +234,15 @@ def register(request):
                     errors.append("That username is already taken.")
                 else:
                     user = User(
-                        username = username,
-                        email    = email,
-                        password = generate_password_hash(password),
+                        username      = username,
+                        email         = email,
+                        password      = generate_password_hash(password),
+                        seller_status = "pending" if wants_seller else "none",
                     )
                     db.add(user)
+                    db.flush()
+                    if wants_seller:
+                        db.add(SellerProfile(user_id=user.user_id))
                     db.commit()
                     uid = user.user_id
                     resp = redirect("/")
@@ -398,7 +431,7 @@ def _get_categories():
 
 
 def product_create(request):
-    denied = _require_admin(request)
+    denied = _require_seller(request)
     if denied:
         return denied
     if request.method == "POST":
@@ -438,7 +471,7 @@ def product_create(request):
 
 
 def product_edit(request, id):
-    denied = _require_admin(request)
+    denied = _require_seller(request)
     if denied:
         return denied
     db = SessionLocal()
@@ -480,7 +513,7 @@ def product_edit(request, id):
 
 
 def product_delete(request, id):
-    denied = _require_admin(request)
+    denied = _require_seller(request)
     if denied:
         return denied
     db = SessionLocal()
@@ -535,28 +568,51 @@ def cart_remove(request):
 
 
 def checkout(request):
+    user = _get_current_user(request)
+    if not user:
+        return redirect("/login/?next=/checkout/&need_login=1")
+
     items, total = _cart_items(request)
     if request.method == "POST":
-        user = _get_current_user(request)
         order_id = None
         if items:
             db = SessionLocal()
             try:
+                product_ids = [item["product"].product_id for item in items]
+                products = (
+                    db.query(Product)
+                    .filter(Product.product_id.in_(product_ids))
+                    .with_for_update()
+                    .all()
+                )
+                products_by_id = {product.product_id: product for product in products}
+
+                for item in items:
+                    product = products_by_id.get(item["product"].product_id)
+                    if not product:
+                        raise ValueError("One of the products is no longer available.")
+                    if (product.product_stock or 0) < item["quantity"]:
+                        raise ValueError(f"Not enough stock for {product.product_name}.")
+
                 order = Order(
-                    user_id = user.user_id if user else None,
+                    user_id = user.user_id,
                     total   = total,
                     status  = "pending",
                 )
                 db.add(order)
                 db.flush()
+
                 for item in items:
+                    product = products_by_id[item["product"].product_id]
+                    product.product_stock = (product.product_stock or 0) - item["quantity"]
                     db.add(OrderItem(
                         order_id      = order.order_id,
-                        product_id    = item["product"].product_id,
-                        product_name  = item["product"].product_name,
-                        product_price = item["product"].product_price,
+                        product_id    = product.product_id,
+                        product_name  = product.product_name,
+                        product_price = product.product_price,
                         quantity      = item["quantity"],
                     ))
+
                 db.commit()
                 order_id = order.order_id
             except Exception:
@@ -600,6 +656,131 @@ def order_detail(request, id):
         db.close()
 
 
+def admin_dashboard(request):
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    return redirect("/admin/orders/")
+
+
+def admin_orders(request):
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    db = SessionLocal()
+    try:
+        orders = (db.query(Order)
+                  .options(joinedload(Order.user), joinedload(Order.items))
+                  .order_by(Order.created_at.desc())
+                  .all())
+        return render("admin/orders.html", {"orders": orders}, request=request)
+    finally:
+        db.close()
+
+
+def admin_order_detail(request, id):
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    db = SessionLocal()
+    try:
+        order = (db.query(Order)
+                 .options(joinedload(Order.user), joinedload(Order.items))
+                 .filter(Order.order_id == id)
+                 .first())
+        if not order:
+            return render("404.html", {}, status=404, request=request)
+        return render("admin/order_detail.html", {"order": order}, request=request)
+    finally:
+        db.close()
+
+
+def admin_order_status(request, id):
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    status = request.form.get("status", "").strip().lower()
+    allowed = {"pending", "processing", "completed", "cancelled"}
+    if status not in allowed:
+        return render("403.html", {}, status=403, request=request)
+    db = SessionLocal()
+    try:
+        order = db.get(Order, id)
+        if not order:
+            return render("404.html", {}, status=404, request=request)
+        order.status = status
+        db.commit()
+    finally:
+        db.close()
+    return redirect(f"/admin/orders/{id}/")
+
+
+def admin_users(request):
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    db = SessionLocal()
+    try:
+        users = db.query(User).order_by(User.created_at.desc()).all()
+        return render("admin/users.html", {"users": users}, request=request)
+    finally:
+        db.close()
+
+
+def admin_user_toggle(request, id):
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    current = _get_current_user(request)
+    if current and current.user_id == id:
+        return render("403.html", {}, status=403, request=request)
+    db = SessionLocal()
+    try:
+        user = db.get(User, id)
+        if not user:
+            return render("404.html", {}, status=404, request=request)
+        user.is_active = not user.is_active
+        db.commit()
+    finally:
+        db.close()
+    return redirect("/admin/users/")
+
+
+def admin_user_approve_seller(request, id):
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    current = _get_current_user(request)
+    if current and current.user_id == id:
+        return render("403.html", {}, status=403, request=request)
+    db = SessionLocal()
+    try:
+        user = db.get(User, id)
+        if not user:
+            return render("404.html", {}, status=404, request=request)
+        user.role = "seller"
+        user.seller_status = "approved"
+        if not user.seller_profile:
+            db.add(SellerProfile(user_id=user.user_id))
+            db.flush()
+        db.commit()
+    finally:
+        db.close()
+    return redirect("/admin/users/")
+
+
+def seller_listings(request):
+    denied = _require_seller(request)
+    if denied:
+        return denied
+    db = SessionLocal()
+    try:
+        products = db.query(Product).order_by(Product.product_id.desc()).all()
+        return render("seller/listings.html", {"products": products}, request=request)
+    finally:
+        db.close()
+
+
 def not_found(request):
     return render("404.html", {}, status=404, request=request)
 
@@ -625,6 +806,14 @@ VIEWS = {
     "checkout":       checkout,
     "order_list":     order_list,
     "order_detail":   order_detail,
+    "admin_dashboard": admin_dashboard,
+    "admin_orders":   admin_orders,
+    "admin_order_detail": admin_order_detail,
+    "admin_order_status": admin_order_status,
+    "admin_users":    admin_users,
+    "admin_user_toggle": admin_user_toggle,
+    "admin_user_approve_seller": admin_user_approve_seller,
+    "seller_listings": seller_listings,
 }
 
 

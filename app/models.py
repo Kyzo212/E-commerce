@@ -1,8 +1,60 @@
-from sqlalchemy import Column, Integer, String, Text, Numeric, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Numeric, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
 
+
+class Supplier(Base):
+    __tablename__ = "suppliers"
+
+    supplier_id        = Column(Integer, primary_key=True, autoincrement=True)
+    supplier_name      = Column(String(120), nullable=False)
+    supplier_email     = Column(String(120), nullable=True)
+    supplier_phone     = Column(String(30), nullable=True)
+    supplier_address   = Column(Text, nullable=True)
+    supplier_is_active = Column(Boolean, nullable=False, default=True)
+    created_at         = Column(DateTime, server_default=func.now())
+
+    def to_dict(self):
+        return {
+            "supplier_id":        self.supplier_id,
+            "supplier_name":      self.supplier_name,
+            "supplier_email":     self.supplier_email or "",
+            "supplier_phone":     self.supplier_phone or "",
+            "supplier_address":   self.supplier_address or "",
+            "supplier_is_active": bool(self.supplier_is_active),
+            "created_at":         self.created_at.isoformat() if self.created_at else "",
+        }
+
+    def __repr__(self):
+        return f"<Supplier id={self.supplier_id} name={self.supplier_name!r}>"
+
+
+class AdminProfile(Base):
+    __tablename__ = "admin_profiles"
+
+    admin_profile_id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id          = Column(Integer, ForeignKey("users.user_id"), nullable=False, unique=True)
+    created_at       = Column(DateTime, server_default=func.now())
+
+    user = relationship("User", back_populates="admin_profile")
+
+    def __repr__(self):
+        return f"<AdminProfile user_id={self.user_id}>"
+
+
+class SellerProfile(Base):
+    __tablename__ = "seller_profiles"
+
+    seller_profile_id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id           = Column(Integer, ForeignKey("users.user_id"), nullable=False, unique=True)
+    approved_at       = Column(DateTime, nullable=True)
+    created_at        = Column(DateTime, server_default=func.now())
+
+    user = relationship("User", back_populates="seller_profile")
+
+    def __repr__(self):
+        return f"<SellerProfile user_id={self.user_id}>"
 
 class Product(Base):
     __tablename__ = "products"
@@ -33,19 +85,35 @@ class Product(Base):
 class User(Base):
     __tablename__ = "users"
 
-    user_id    = Column(Integer, primary_key=True, autoincrement=True)
-    username   = Column(String(80),  unique=True, nullable=False)
-    email      = Column(String(120), unique=True, nullable=False)
-    password   = Column(String(256), nullable=False)
-    role       = Column(String(20),  nullable=False, default="customer")  # 'customer' | 'admin'
-    created_at = Column(DateTime, server_default=func.now())
+    user_id           = Column(Integer, primary_key=True, autoincrement=True)
+    username          = Column(String(80),  unique=True, nullable=False)
+    email             = Column(String(120), unique=True, nullable=False)
+    password          = Column(String(256), nullable=False)
+    role              = Column(String(20), nullable=False, default="customer")  # 'customer' | 'admin'
+    seller_status     = Column(String(20), nullable=False, default="none")  # 'none' | 'pending' | 'approved'
+    is_active         = Column(Boolean, nullable=False, default=True)
+    created_at        = Column(DateTime, server_default=func.now())
+
+    admin_profile     = relationship("AdminProfile", back_populates="user", uselist=False)
+    seller_profile    = relationship("SellerProfile", back_populates="user", uselist=False)
 
     @property
     def is_admin(self):
         return self.role == "admin"
 
+    @property
+    def is_seller(self):
+        return self.role in {"admin", "seller"}
+
+    @property
+    def wants_to_be_seller(self):
+        return self.seller_status == "pending"
+
     def __repr__(self):
-        return f"<User id={self.user_id} username={self.username!r} role={self.role!r}>"
+        return (
+            f"<User id={self.user_id} username={self.username!r} "
+            f"role={self.role!r} seller_status={self.seller_status!r}>"
+        )
 
 
 class Order(Base):
